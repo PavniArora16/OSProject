@@ -182,3 +182,160 @@ button:disabled { opacity:.45; cursor:not-allowed; transform:none; }
     padding: 12px 16px;
   }
 }
+
+
+/* Reusable OS simulation components */
+.os-card {
+  background: var(--card-bg, #ffffff);
+  border: 1px solid var(--border-color, #e2e8f0);
+  border-radius: 12px;
+  padding: 18px;
+  margin-bottom: 16px;
+  color: var(--text-color, #172033);
+}
+
+.os-card h2 {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+}
+
+.os-card p {
+  line-height: 1.5;
+}
+
+.os-card label {
+  display: block;
+  margin: 12px 0 6px;
+}
+
+.os-card select {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: white;
+  color: #172033;
+}
+
+.control-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.control-actions button {
+  padding: 10px 14px;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.control-actions button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.statistics-grid,
+.resource-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.statistic-card p,
+.resource-item span {
+  color: #64748b;
+  font-size: 0.9rem;
+  margin: 0 0 8px;
+}
+
+.statistic-card h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.section-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.event-log {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.event-row {
+  display: flex;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #e2e8f0;
+  overflow-wrap: anywhere;
+}
+
+.event-number {
+  color: #64748b;
+  min-width: 24px;
+}
+
+.empty-state,
+.muted-text {
+  color: #64748b;
+}
+
+.execution-timeline {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.execution-timeline li {
+  display: flex;
+  gap: 12px;
+  padding: 10px 0;
+}
+
+.timeline-marker {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #3b82f6;
+}
+
+.execution-timeline li p {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+.thread-state {
+  background: #e0f2fe;
+  color: #075985;
+  border-radius: 20px;
+  padding: 4px 8px;
+  font-size: 0.8rem;
+}
+
+.resource-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px;
+  background: #f8fafc;
+  border-radius: 8px;
+}
+
+@media (max-width: 600px) {
+  .os-card {
+    padding: 14px;
+  }
+
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

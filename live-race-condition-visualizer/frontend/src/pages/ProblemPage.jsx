@@ -1,278 +1,314 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { io } from "socket.io-client";
+import ControlPanel from "../components/ControlPanel";
+import EventLog from "../components/EventLog";
+import ExecutionTimeline from "../components/ExecutionTimeline";
+import ResourceMonitor from "../components/ResourceMonitor";
+import StatisticsCards from "../components/StatisticsCards";
+import ThreadCard from "../components/ThreadCard";
 import "../styles/problem-pages.css";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://localhost:5000";
 const SOCKET_BASE = import.meta.env.VITE_SOCKET_URL || API_BASE;
 
-const PROBLEMS = {
-  shared_counter: {
-    title: "Shared Counter",
-    subtitle: "Observe how unsynchronized access differs from mutex-protected access.",
-    modes: [
-      { value: "race", label: "Race condition" },
-      { value: "mutex", label: "Mutex protected" },
-    ],
-    description: "Four threads each perform 100,000 increments. In mutex mode, the critical section is protected. In race mode, concurrent unsynchronized updates can be lost; the exact result can vary between runs.",
-  },
-  producer_consumer: {
-    title: "Producer–Consumer",
-    subtitle: "Explore coordination between producers, consumers, and a bounded buffer.",
-    modes: [],
-    description: "Producers add items and consumers remove them. Correct synchronization prevents the buffer from overflowing or consumers from taking items from an empty buffer.",
-  },
-  dining_philosophers: {
-    title: "Dining Philosophers",
-    subtitle: "Explore competing threads and resource acquisition.",
-    modes: [
-      { value: "deadlock", label: "Deadlock demonstration" },
-      { value: "prevention", label: "Deadlock prevention" },
-    ],
-    description: "Philosophers compete for shared forks. The prevention mode should be interpreted according to the strategy implemented by your C engine.",
-  },
-  readers_writers: {
-    title: "Readers–Writers",
-    subtitle: "Explore shared reads and exclusive writes.",
-    modes: [],
-    description: "Readers may share access while a writer typically needs exclusive access. Fairness and starvation behavior depend on the policy implemented by your C engine.",
-  },
-};
-
-function getSimulationId(payload) {
-  return payload?.simulation?.simulationId ||
-    payload?.simulation?.id ||
-    payload?.simulationId ||
-    payload?.id ||
-    null;
-}
-
-function getEvents(payload) {
-  const list = payload?.simulation?.events || payload?.events;
-  return Array.isArray(list) ? list : [];
-}
-
-function prettyEvent(event) {
-  if (typeof event === "string") return event;
-  const name = event?.event || event?.type || "event";
-  const details = Object.entries(event || {})
-    .filter(([key, value]) => key !== "event" && key !== "type" && key !== "simulationId" && value !== null && value !== undefined)
-    .map(([key, value]) => `${key.replaceAll("_", " ")}: ${typeof value === "object" ? JSON.stringify(value) : value}`)
-    .join(" · ");
-  return details ? `${name.replaceAll("_", " ")} — ${details}` : name.replaceAll("_", " ");
-}
-
-export default function ProblemPage({ problem }) {
-  const config = PROBLEMS[problem];
-  const [mode, setMode] = useState(config?.modes?.[0]?.value || "");
-  const [status, setStatus] = useState("idle");
-  const [simulationId, setSimulationId] = useState(null);
+export default function ProblemPage({
+  problem = "shared_counter",
+  title = "Synchronization Simulator",
+  description = "Explore thread execution and synchronization.",
+}) {
+  const [mode, setMode] = useState("race");
+  const [simulation, setSimulation] = useState(null);
   const [events, setEvents] = useState([]);
-  const [result, setResult] = useState(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [connection, setConnection] = useState("connecting");
+  const [threads, setThreads] = useState([]);
+  const [resources, setResources] = useState({});
+  const startTime = useRef(null);
   const socketRef = useRef(null);
-  const pollRef = useRef(null);
-  const seenEventsRef = useRef(new Set());
+  const simulationIdRef = useRef(null);
 
-  const addEvent = useCallback((event) => {
-    if (!event) return;
-    const key = JSON.stringify(event);
-    if (seenEventsRef.current.has(key)) return;
-    seenEventsRef.current.add(key);
-    setEvents((current) => [...current, event].slice(-500));
+  const simulationId = simulation?.simulationId;
+
+  const updateFromPayload = useCallback((payload) => {
+    const data = payload?.simulation ?? payload;
+
+    if (data?.simulationId) {
+      setSimulation((previous) => ({
+        ...previous,
+        ...data,
+      }));
+    }
+
+    if (Array.isArray(data?.events)) {
+      setEvents(data.events);
+    }
+
+    if (data?.threads && Array.isArray(data.threads)) {
+      setThreads(data.threads);
+    }
+
+    if (data?.resources && typeof data.resources === "object") {
+      setResources(data.resources);
+    }
+
+    if (data?.result) {
+      setSimulation((previous) => ({
+        ...previous,
+        ...data,
+        status: data.status ?? "completed",
+      }));
+    }
   }, []);
 
+  // Fetch the latest simulation snapshot.
   const refreshSimulation = useCallback(async (id) => {
     if (!id) return;
+
     try {
-      const response = await fetch(`${API_BASE}/api/simulations/${encodeURIComponent(id)}`);
-      const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body?.message || `Could not retrieve simulation (${response.status})`);
-      const simulation = body?.simulation || body;
-      for (const event of getEvents(body)) addEvent(event);
-      if (simulation?.result) setResult(simulation.result);
-      if (simulation?.status) {
-        setStatus(simulation.status);
-        if (["completed", "failed", "stopped", "cancelled"].includes(simulation.status)) {
-          if (pollRef.current) {
-            clearInterval(pollRef.current);
-            pollRef.current = null;
-          }
-        }
+      const response = await fetch(
+        `${API_BASE}/api/simulations/${encodeURIComponent(id)}`
+      );
+
+      if (!response.ok) {
+        throw new Error(`Unable to load simulation (${response.status})`);
       }
+
+      const payload = await response.json();
+      updateFromPayload(payload);
     } catch (err) {
-      setError(err.message || "Could not refresh simulation details.");
+      setError(err.message || "Could not refresh the simulation.");
     }
-  }, [addEvent]);
+  }, [updateFromPayload]);
 
+  // Subscribe to live simulation events.
   useEffect(() => {
-    const socket = io(SOCKET_BASE, { transports: ["websocket", "polling"], reconnection: true });
-    socketRef.current = socket;
-    socket.on("connect", () => setConnection("connected"));
-    socket.on("disconnect", () => setConnection("disconnected"));
-    socket.on("connect_error", () => setConnection("disconnected"));
+    if (!simulationId) return;
 
-    const onSimulationEvent = (event) => {
-      if (!event || !simulationId || event.simulationId !== simulationId) return;
-      addEvent(event);
-    };
-    const onFinished = (payload) => {
-      const finishedId = payload?.simulationId || payload?.simulation?.simulationId;
-      if (finishedId && finishedId === simulationId) {
-        setResult(payload?.result || payload?.simulation?.result || payload);
-        setStatus(payload?.status || payload?.simulation?.status || "completed");
-        refreshSimulation(finishedId);
+    simulationIdRef.current = simulationId;
+
+    const socket = io(SOCKET_BASE, {
+      transports: ["websocket", "polling"],
+    });
+
+    socketRef.current = socket;
+
+    const handleEvent = (payload) => {
+      const eventSimulationId =
+        payload?.simulationId ?? payload?.simulation?.simulationId;
+
+      if (
+        eventSimulationId &&
+        eventSimulationId !== simulationIdRef.current
+      ) {
+        return;
       }
+
+      const event = payload?.event ?? payload;
+
+      setEvents((previous) => {
+        // Avoid adding the same event twice when polling and sockets overlap.
+        if (
+          event?.id &&
+          previous.some((item) => item?.id === event.id)
+        ) {
+          return previous;
+        }
+
+        return [...previous, event].slice(-500);
+      });
     };
-    socket.on("simulation:event", onSimulationEvent);
-    socket.on("simulation:finished", onFinished);
+
+    const handleFinished = (payload) => {
+      const eventSimulationId =
+        payload?.simulationId ?? payload?.simulation?.simulationId;
+
+      if (
+        eventSimulationId &&
+        eventSimulationId !== simulationIdRef.current
+      ) {
+        return;
+      }
+
+      updateFromPayload(payload);
+      refreshSimulation(simulationId);
+    };
+
+    socket.on("simulation:event", handleEvent);
+    socket.on("simulation:finished", handleFinished);
 
     return () => {
-      socket.off("simulation:event", onSimulationEvent);
-      socket.off("simulation:finished", onFinished);
+      socket.off("simulation:event", handleEvent);
+      socket.off("simulation:finished", handleFinished);
       socket.disconnect();
-      socketRef.current = null;
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [addEvent, refreshSimulation, simulationId]);
 
-  async function startSimulation() {
+      if (socketRef.current === socket) {
+        socketRef.current = null;
+      }
+    };
+  }, [simulationId, refreshSimulation, updateFromPayload]);
+
+  // Polling is a fallback if some live events are missed.
+  useEffect(() => {
+    if (!simulationId) return;
+
+    const status = simulation?.status;
+    if (["completed", "failed", "stopped"].includes(status)) return;
+
+    const timer = setInterval(() => {
+      refreshSimulation(simulationId);
+    }, 1200);
+
+    return () => clearInterval(timer);
+  }, [simulationId, simulation?.status, refreshSimulation]);
+
+  const runSimulation = async () => {
+    setLoading(true);
     setError("");
     setEvents([]);
-    setResult(null);
-    setSimulationId(null);
-    seenEventsRef.current.clear();
-    setStatus("starting");
+    setThreads([]);
+    setResources({});
+    setSimulation(null);
+    startTime.current = Date.now();
+
     try {
-      const body = { problem };
-      if (config.modes.length) body.mode = mode;
       const response = await fetch(`${API_BASE}/api/simulations`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ problem, mode }),
       });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.message || `Start failed (${response.status})`);
-      const id = getSimulationId(payload);
-      if (!id) throw new Error("The API accepted the request but did not return a simulation ID.");
-      setSimulationId(id);
-      setStatus(payload?.simulation?.status || "running");
-      await refreshSimulation(id);
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = setInterval(() => refreshSimulation(id), 900);
-    } catch (err) {
-      setStatus("failed");
-      setError(err.message || "Unable to start simulation.");
-    }
-  }
 
-  async function stopSimulation() {
+      const payload = await response.json();
+
+      if (!response.ok) {
+        throw new Error(
+          payload?.error || payload?.message || "Could not start simulation."
+        );
+      }
+
+      const data = payload?.simulation ?? payload;
+      setSimulation(data);
+
+      if (data?.simulationId) {
+        await refreshSimulation(data.simulationId);
+      }
+    } catch (err) {
+      setError(err.message || "Could not start simulation.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const stopSimulation = async () => {
     if (!simulationId) return;
+
     setError("");
+
     try {
-      const response = await fetch(`${API_BASE}/api/simulations/${encodeURIComponent(simulationId)}/stop`, { method: "POST" });
+      const response = await fetch(
+        `${API_BASE}/api/simulations/${encodeURIComponent(simulationId)}/stop`,
+        { method: "POST" }
+      );
+
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(payload?.message || `Stop failed (${response.status})`);
-      setStatus(payload?.simulation?.status || "stopped");
+
+      if (!response.ok) {
+        throw new Error(
+          payload?.error || payload?.message || "Could not stop simulation."
+        );
+      }
+
       await refreshSimulation(simulationId);
     } catch (err) {
-      setError(err.message || "Unable to stop simulation.");
+      setError(err.message || "Could not stop simulation.");
     }
-  }
+  };
 
-  if (!config) return <main className="page-shell"><h1>Unknown visualizer</h1></main>;
+  const result = simulation?.result ?? {};
+  const duration =
+    startTime.current && simulation?.status === "completed"
+      ? Date.now() - startTime.current
+      : null;
 
-  const finalCounterEvent = [...events].reverse().find((event) => event?.event === "simulation_completed" && event?.final_counter !== undefined);
-  const finalCounter = result?.final_counter ?? result?.finalCounter ?? finalCounterEvent?.final_counter;
-  const expectedCounter = result?.expected_counter ?? result?.expectedCounter ?? finalCounterEvent?.expected_counter;
-  const lostUpdates = Number.isFinite(Number(finalCounter)) && Number.isFinite(Number(expectedCounter))
-    ? Math.max(0, Number(expectedCounter) - Number(finalCounter))
-    : null;
+  const statistics = {
+    events: events.length,
+    threads: threads.length || "—",
+    status: simulation?.status ?? "Idle",
+    duration,
+  };
 
   return (
-    <main className="page-shell">
-      <div className="page-heading">
-        <div>
-          <p className="eyebrow">OS SYNCHRONIZATION LAB</p>
-          <h1>{config.title}</h1>
-          <p className="page-subtitle">{config.subtitle}</p>
-        </div>
-        <div className={`connection-pill ${connection}`}>
-          <span className="connection-dot" />
-          Socket.IO: {connection}
-        </div>
-      </div>
+    <main className="problem-page">
+      <header className="problem-header">
+        <h1>{title}</h1>
+        <p>{description}</p>
+      </header>
 
-      <section className="info-card">
-        <h2>What you are observing</h2>
-        <p>{config.description}</p>
-      </section>
+      <ControlPanel
+        problem={problem}
+        onProblemChange={() => {}}
+        onRun={runSimulation}
+        onStop={stopSimulation}
+        running={
+          loading ||
+          ["queued", "running", "pending"].includes(simulation?.status)
+        }
+        disabled={loading}
+      />
 
-      <section className="control-card">
-        <div className="control-copy">
-          <h2>Simulation controls</h2>
-          <p>Start a real C-engine run and inspect the returned events.</p>
+      {error && (
+        <div className="simulation-error" role="alert">
+          <strong>Simulation error:</strong> {error}
         </div>
-        {config.modes.length > 0 && (
-          <label className="field-label">
-            Execution mode
-            <select value={mode} onChange={(event) => setMode(event.target.value)} disabled={status === "running" || status === "starting"}>
-              {config.modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
-          </label>
-        )}
-        <div className="button-row">
-          <button className="primary-button" onClick={startSimulation} disabled={status === "starting" || status === "running"}>
-            {status === "starting" ? "Starting…" : "Run simulation"}
-          </button>
-          <button className="secondary-button" onClick={stopSimulation} disabled={!simulationId || !["running", "starting"].includes(status)}>
-            Stop
-          </button>
-        </div>
-        <div className="status-line">
-          <span className={`status-badge ${status}`}>{status}</span>
-          {simulationId && <span className="simulation-id">ID: {simulationId}</span>}
-        </div>
-        {error && <div className="error-box" role="alert">{error}</div>}
-      </section>
-
-      {problem === "shared_counter" && (
-        <section className="stats-grid">
-          <article className="stat-card"><span>Final counter</span><strong>{finalCounter ?? "—"}</strong></article>
-          <article className="stat-card"><span>Expected counter</span><strong>{expectedCounter ?? "—"}</strong></article>
-          <article className="stat-card"><span>Lost increments</span><strong>{lostUpdates ?? "—"}</strong></article>
-          <article className="stat-card"><span>Events received</span><strong>{events.length}</strong></article>
-        </section>
       )}
 
-      <section className="event-card">
-        <div className="section-heading">
-          <div><h2>Execution timeline</h2><p>Events from the backend/C engine, newest at the bottom.</p></div>
-          <span className="event-count">{events.length} events</span>
-        </div>
-        {events.length === 0 ? (
-          <div className="empty-state"><strong>No events yet</strong><span>Run a simulation to see its event history.</span></div>
-        ) : (
-          <ol className="event-list">
-            {events.map((event, index) => (
-              <li key={`${index}-${event?.event || "event"}`}>
-                <span className="event-index">{String(index + 1).padStart(2, "0")}</span>
-                <div className="event-content">
-                  <strong>{String(event?.event || event?.type || "Event").replaceAll("_", " ")}</strong>
-                  <p>{prettyEvent(event)}</p>
-                </div>
-              </li>
-            ))}
-          </ol>
-        )}
-      </section>
+      <StatisticsCards statistics={statistics} />
 
-      {result && (
-        <section className="result-card">
-          <h2>Simulation result</h2>
-          <pre>{JSON.stringify(result, null, 2)}</pre>
-        </section>
-      )}
+      <section className="simulation-layout">
+        <div className="simulation-main">
+          <EventLog events={events} />
+          <ExecutionTimeline events={events} />
+        </div>
+
+        <aside className="simulation-side">
+          <ResourceMonitor resources={resources} />
+
+          <section className="os-card">
+            <h2>Thread Activity</h2>
+            {threads.length ? (
+              threads.map((thread, index) => (
+                <ThreadCard
+                  key={thread.id ?? thread.name ?? index}
+                  thread={thread}
+                />
+              ))
+            ) : (
+              <p className="empty-state">
+                Thread details will appear when the engine provides them.
+              </p>
+            )}
+          </section>
+
+          {simulation && (
+            <section className="os-card">
+              <h2>Simulation Result</h2>
+              <p>
+                <strong>Status:</strong>{" "}
+                {simulation.status ?? "Unknown"}
+              </p>
+              {result.exitCode !== undefined && (
+                <p>
+                  <strong>Exit code:</strong> {result.exitCode}
+                </p>
+              )}
+              {result.stderr?.length > 0 && (
+                <pre className="simulation-stderr">
+                  {result.stderr.join("\n")}
+                </pre>
+              )}
+            </section>
+          )}
+        </aside>
+      </section>
     </main>
   );
 }
